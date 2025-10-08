@@ -1,0 +1,963 @@
+diff --git a//dev/null b/ycf-knowledge-graph.php
+index 0000000000000000000000000000000000000000..ac05509a77e6083c4896110fe7228b968498d342 100644
+--- a//dev/null
++++ b/ycf-knowledge-graph.php
+@@ -0,0 +1,958 @@
++<?php
++
++/**
++ * Plugin Name: YCF Knowledge Graph
++ * Plugin URI: https://blitzmetrics.com/knowledge-graph-explorer/
++ * Description: A WordPress plugin for exploring Google's knowledge graph which allows users to track changes to entities over time.
++ * Version: 1.0.0
++ * Author: Your Content Factory
++ * Author URI: https://blitzmetrics.com
++ * License: GPL-2.0+
++ * License URI: http://www.gnu.org/licenses/gpl-2.0.txt
++ * Text Domain: yc-knowledge-graph
++ */
++
++ if (!function_exists('add_action' ) ) {
++echo "Plugin can't be called directly";
++exit;
++}
++
++add_action('admin_menu', 'ycf_add_admin_page' );
++
++add_action('admin_head', 'ycf_css_and_js', 7 );
++
++add_action('admin_enqueue_scripts', 'ycf_css_and_js', 7 );
++
++add_action('wp_enqueue_scripts', 'ycf_css_and_js', 7 );
++
++add_action( 'init', 'register_kg_entity_cpt' );
++
++add_filter( 'template_include', 'get_kg_entity_singular_template', 99 );
++
++add_filter( 'archive_template', 'get_kg_entity_archive_template' );
++
++add_filter( 'the_content', 'is_owner_of_kg_entity' );
++
++add_filter( 'parse_query', 'filter_by_author' );
++
++add_filter('manage_kg_entity_columns', 'remove_rank_math_seo_columns');
++
++add_filter( 'rank_math/show_score', 'remove_rank_math_seo_score' );
++
++if (!class_exists('acf_pro') || !class_exists('acf')) {
++            
++    // Define path and URL to the ACF plugin.
++    define( 'YCF_ACF_PATH', __DIR__ . '/includes/acf/' );
++    define( 'YCF_ACF_URL', plugin_dir_url (__FILE__) . '/includes/acf/' );
++    
++    // Include the ACF plugin.
++    include_once( YCF_ACF_PATH . 'acf.php' );
++    
++    // Customize the url setting to fix incorrect asset URLs.
++    add_filter('acf/settings/url', 'ycf_acf_settings_url');
++    function ycf_acf_settings_url( $url ) {
++        return YCF_ACF_URL;
++    }
++    
++    // (Optional) Hide the ACF admin menu item.
++    add_filter('acf/settings/show_admin', 'ycf_acf_settings_show_admin');
++    function ycf_acf_settings_show_admin( $show_admin ) {
++        return false;
++    }
++}
++
++if ( class_exists( 'acf' ) || class_exists( 'acf_pro' ) ) {
++    add_action( 'acf/init', 'register_kg_entity_acf_fields' );
++}
++
++add_filter( 'acf/load_field', 'ycf_readonly_fields' );
++
++add_action('acf/save_post', 'ycf_acf_save_kg_entity', 20);
++
++add_action( 'admin_head', 'remove_rank_math_seo_metabox' );
++
++add_action( 'wp_ajax_add_new_kg_entity', 'wp_ajax_add_new_kg_entity_handler' );
++add_action( 'wp_ajax_nopriv_add_new_kg_entity', 'wp_ajax_add_new_kg_entity_handler' ); 
++
++add_shortcode( 'ycf_kg_explorer', 'ycf_kg_explorer_shortcode_html' );
++add_shortcode( 'kg_entity', 'kg_entity_singular_shortcode' );
++add_shortcode( 'kg_entity_grid', 'kg_entity_grid_shortcode' ); 
++
++register_deactivation_hook( __FILE__, 'ycf_deactivation' );
++
++function ycf_add_admin_page() {
++    add_menu_page(
++        'YCF Knowledge Graph', 
++        'YCF Knowledge Graph', 
++        'edit_posts', 
++        'ycf-kg-explorer', 
++        'ycf_kg_explorer_admin_page_html',
++        plugin_dir_url(__FILE__).'/images/icon.png'
++    );
++}
++
++function ycf_css_and_js($hook) {
++    wp_register_style('ycf-css', plugin_dir_url(__FILE__).'css/styles.css' );
++    wp_enqueue_style('ycf-css');
++
++    wp_register_style('ycf-css-spinner', plugin_dir_url(__FILE__).'css/spinner.css' );
++    wp_enqueue_style('ycf-css-spinner');
++
++    wp_register_style('ycf-kg-search', plugin_dir_url(__FILE__).'css/kg-search.css' );
++    wp_enqueue_style('ycf-kg-search');
++
++    wp_register_script('ycf-kg-search-script', plugin_dir_url(__FILE__).'js/kg-search.js'); // , [ 'google-kgsearch' ]                  
++    wp_localize_script(
++        'ycf-kg-search-script', 
++        'ycfKgSearch',     
++        array(                                                                      
++            'kgSearchNonce' => wp_create_nonce('kg-search-nonce'),
++            'ajaxUrl' => admin_url('admin-ajax.php'),
++            'redirectUrl' => admin_url('edit.php'),
++        )
++    );
++    wp_enqueue_script('ycf-kg-search-script');
++}
++
++function ycf_get_explorer_intro_markup() {
++    ob_start();
++    ?>
++    <section class="kg-intro">
++        <h3 class="kg-subheading">Welcome to the Knowledge Graph Explorer</h3>
++        <p class="kg-lede">Use this tool to see how Google understands you, your brand, or your organization. We'll guide you through the process, highlight what each result means, and help you keep track of your Knowledge Panel over time.</p>
++        <ol class="kg-steps">
++            <li><strong>Search for your entity.</strong> Type the name of the person, company, or brand you want to review and press <em>Search Knowledge Graph</em>.</li>
++            <li><strong>Review the panel preview.</strong> We'll show you what Google is surfacing&mdash;including titles, descriptions, and images&mdash;so you know exactly what appears when someone searches for you.</li>
++            <li><strong>Save entities you care about.</strong> Add important entities to your dashboard so you can monitor changes week over week.</li>
++        </ol>
++        <div class="kg-tips">
++            <h4>What am I looking at?</h4>
++            <p>The Knowledge Panel is the information box that appears on Google when you search for well-known people, places, or things. It pulls data from Google's Knowledge Graph. The Explorer lets you preview that information without leaving WordPress.</p>
++        </div>
++    </section>
++    <?php
++    return ob_get_clean();
++}
++
++function ycf_get_results_helper_markup() {
++    ob_start();
++    ?>
++    <aside class="kg-results-helper" aria-live="polite">
++        <h4>Understanding Your Results</h4>
++        <ul>
++            <li><strong>Entity card:</strong> Shows Google's current summary, image, and category for your entity.</li>
++            <li><strong>Confidence score:</strong> Indicates how certain Google is that the entity matches the query. Higher is better.</li>
++            <li><strong>Triggered / Claimed:</strong> Tells you whether a Knowledge Panel is currently showing and if it's been claimed.</li>
++        </ul>
++        <p>Not seeing what you expect? Try alternate spellings, include a location, or add a primary website URL to help Google disambiguate similar entities.</p>
++    </aside>
++    <?php
++    return ob_get_clean();
++}
++
++function ycf_get_search_bar_markup() {
++    ob_start();
++    ?>
++    <div id="kg-search-container">
++        <div id="search-bar">
++            <label class="screen-reader-text" for="kg-search">Search the Google Knowledge Graph</label>
++            <input id="kg-search" type="text" placeholder="Search for a person, business, or brand" aria-describedby="kg-search-help">
++            <button id="kg-search-submit" class="button button-primary" type="button">Search Knowledge Graph</button>
++        </div>
++        <p id="kg-search-help" class="description">Tip: Start by entering your full name or your brand name just like someone would search on Google.</p>
++    </div>
++    <?php
++    return ob_get_clean();
++}
++
++function ycf_get_results_container_markup() {
++    ob_start();
++    ?>
++    <div id="kg-results-container" class="kg-results-layout">
++        <div id="kg-results-grid" role="region" aria-live="polite" aria-label="Knowledge Graph search results">
++            <div class="kg-results-placeholder">
++                <p>Search above to see Knowledge Panel previews. We'll list matching entities here so you can review the details before saving them.</p>
++            </div>
++        </div>
++        <?php echo ycf_get_results_helper_markup(); ?>
++    </div>
++    <?php
++    return ob_get_clean();
++}
++
++function ycf_kg_explorer_shortcode_html() {
++    ob_start();
++    ?>
++        <div id="kg-search-page">
++            <h2 class="kg-heading">Knowledge Graph Explorer - Beta</h2>
++            <?php echo ycf_get_explorer_intro_markup(); ?>
++            <?php echo ycf_get_search_bar_markup(); ?>
++            <?php echo ycf_get_results_container_markup(); ?>
++        </div>
++    <?php
++    return ob_get_clean();
++}
++
++function ycf_kg_explorer_admin_page_html() {
++    ?>
++        <div id="kg-search-page">
++            <h2 class="kg-heading">Knowledge Graph Explorer - Beta</h2>
++            <?php echo ycf_get_explorer_intro_markup(); ?>
++            <?php echo ycf_get_search_bar_markup(); ?>
++            <?php echo ycf_get_results_container_markup(); ?>
++        </div>
++    <?php
++}
++
++function register_kg_entity_cpt() {
++    $args =  [
++        'label'  => esc_html__( 'KG Entities', 'ycf-kg-explorer' ),
++        'labels' => [
++            'menu_name'          => esc_html__( 'KG Entities', 'ycf-knowledge-graph' ),
++            'name_admin_bar'     => esc_html__( 'KG Entity', 'ycf-knowledge-graph' ),
++            'add_new'            => esc_html__( 'Add KG Entity', 'ycf-knowledge-graph' ),
++            'add_new_item'       => esc_html__( 'Add new KG Entity', 'ycf-knowledge-graph' ),
++            'new_item'           => esc_html__( 'New KG Entity', 'ycf-knowledge-graph' ),
++            'edit_item'          => esc_html__( 'Edit KG Entity', 'ycf-knowledge-graph' ),
++            'view_item'          => esc_html__( 'View KG Entity', 'ycf-knowledge-graph' ),
++            'update_item'        => esc_html__( 'View KG Entity', 'ycf-knowledge-graph' ),
++            'all_items'          => esc_html__( 'All KG Entities', 'ycf-knowledge-graph' ),
++            'search_items'       => esc_html__( 'Search KG Entities', 'ycf-knowledge-graph' ),
++            'parent_item_colon'  => esc_html__( 'Parent KG Entity', 'ycf-knowledge-graph' ),
++            'not_found'          => esc_html__( 'No KG Entities found', 'ycf-knowledge-graph' ),
++            'not_found_in_trash' => esc_html__( 'No KG Entities found in Trash', 'ycf-knowledge-graph' ),
++            'name'               => esc_html__( 'KG Entities', 'ycf-knowledge-graph' ),
++            'singular_name'      => esc_html__( 'KG Entity', 'ycf-knowledge-graph' ),
++        ],
++        'public'              => true,
++        'exclude_from_search' => true,
++        'publicly_queryable'  => true,
++        'show_ui'             => true,
++        'show_in_nav_menus'   => true,
++        'show_in_admin_bar'   => true,
++        'show_in_rest'        => false,
++        'capability_type'     => 'post',
++        'hierarchical'        => false,
++        'has_archive'         => true,
++        'query_var'           => true,
++        'can_export'          => false,
++        'rewrite_no_front'    => false,
++        'show_in_menu'        => true,
++        // 'capabilities' => [
++            // 'edit_post' => 'edit_post',
++            // 'read_post' => 'read_post',
++            // 'delete_post' => 'delete_post',
++            // 'edit_posts' => 'edit_posts',
++            // 'edit_others_posts' => 'edit_others_posts',
++            // 'delete_posts' => 'delete_posts',
++            // 'publish_posts' => 'publish_posts',
++            // 'read_private_posts' => 'read_private_posts',
++            // 'read' => 'read',
++            // 'delete_private_posts' => 'delete_private_posts',
++            // 'delete_published_posts' => 'delete_published_posts',
++            // 'delete_others_posts' => 'delete_others_posts',
++            // 'edit_private_posts' => 'edit_private_posts',
++            // 'edit_published_posts' => 'edit_published_posts',
++            // 'create_posts' => false, 
++        // ],
++        'menu_icon'           => 'dashicons-networking',
++        'supports' => [
++            'title',
++            'thumbnail',
++            'custom-fields',
++        ],  
++        'delete_with_user'    => true,
++        'rewrite' => array(
++            'slug' => 'knowledge-graph',
++            'with_front' => false,
++        ),
++    ];
++
++    register_post_type('kg_entity', $args);
++} 
++
++function get_kg_entity_singular_template( $template ){
++    global $post;
++
++    if ( !isset( $post ) ) {
++        return $template;
++    }
++    
++    if( is_singular( 'kg_entity' ) ) {
++        $plugin_root_dir = WP_PLUGIN_DIR . '/ycf-knowledge-graph/';
++        $file = $plugin_root_dir . '/templates/single-kg-entity.php';
++
++        if( file_exists( $file ) ) {
++            $template = $file;
++        }
++    }
++
++    // ALWAYS return the $template, or *everything* will be blank.
++    return $template;
++}
++
++function get_kg_entity_archive_template($archive_template){
++    global $post;
++    $plugin_root_dir = WP_PLUGIN_DIR . '/ycf-knowledge-graph/';
++
++    if ( is_post_type_archive('kg_entity') ){
++        $archive_template = $plugin_root_dir . '/templates/archive-kg-entity.php';
++    }
++
++    return $archive_template;
++}
++
++function filter_by_author($query) {
++    global $pagenow;
++    
++    if (isset($_GET['post_type'])
++        && $pagenow === 'edit.php'
++        && 'kg_entity' == $_GET['post_type']
++        && is_admin()
++        && !current_user_can('delete_plugins')
++    ) {
++        $query->query_vars['author'] = get_current_user_id();
++        return $query;
++    } else if (isset($_GET['post_type'])
++        && $pagenow === 'edit.php'
++        && 'kg_entity' == $_GET['post_type']
++        && is_admin()
++    ) {
++        return $query;
++    }
++}
++
++function is_owner_of_kg_entity( $content ) {
++    global $post;
++
++    // TODO: Implement this function
++    // $owner_id = get_field( 'owner_id', $post->ID );
++
++    // if ( $post->post_type == 'kg_entity' ) {
++    //     if ( ! is_user_logged_in() || ! get_current_user_id() == $owner_id ) {
++    //         $content = 'Only the owner of this post can view this content.';
++    //     }
++    // }
++
++    return $content;
++}
++
++function remove_rank_math_seo_columns($columns) {
++    unset($columns['rank_math_title']); 
++    unset($columns['rank_math_description']); 
++    unset($columns['rank_math_seo_score']);
++    return $columns;
++}
++
++function remove_rank_math_seo_metabox() {
++    global $post_type;
++    if ( 'kg_entity' == $post_type ) {
++        remove_meta_box('rank_math_metabox', 'kg_entity', 'normal');
++    }
++}
++
++function remove_rank_math_seo_score(){ 
++    global $post_type;
++    if( ! $post_type == 'kg_entity' ) { 
++        return false; 
++    } else { 
++        return true; 
++    } 
++}
++
++function register_kg_entity_acf_fields() {
++    if (function_exists('acf_add_local_field_group')) {
++        acf_add_local_field_group(array(
++            'key' => 'group_kg_entity',
++            'title' => 'KG Entity Fields',
++            'fields' => array(
++                array(
++                    'key' => 'is_entity_home',
++                    'label' => 'Is Entity Home?',
++                    'name' => 'is_entity_home',
++                    'type' => 'true_false',
++                ),
++                array(
++                    'key' => 'kgmid',
++                    'label' => 'KGMID',
++                    'name' => 'kgmid',
++                    'type' => 'text',
++                ),
++                array(
++                    'key' => 'type',
++                    'label' => 'Type',
++                    'name' => 'type',
++                    'type' => 'text',
++                ),
++                array(
++                    'key' => 'confidence_score',
++                    'label' => 'Confidence Score',
++                    'name' => 'confidence_score',
++                    'type' => 'number',
++                ),
++                array(
++                    'key' => 'confidence_score_delta',
++                    'label' => 'Confidence Score Delta (Change Over the Last Week)',
++                    'name' => 'confidence_score-delta',
++                    'type' => 'number',
++                    'wrapper' => array (
++                        'class' => 'acf-hidden',
++                    ),
++                ),
++                array(
++                    'key' => 'description',
++                    'label' => 'Description',
++                    'name' => 'description',
++                    'type' => 'text',
++                ),
++                array(
++                    'key' => 'detailed_description',
++                    'label' => 'Detailed Description',
++                    'name' => 'detailed_description',
++                    'type' => 'textarea',
++                ),
++                array(
++                    'key' => 'detailed_description_url',
++                    'label' => 'Detailed Description URL',
++                    'name' => 'detailed_description_url',
++                    'type' => 'url',
++                ),
++                array(
++                    'key' => 'img_url',
++                    'label' => 'Image URL',
++                    'name' => 'img_url',
++                    'type' => 'url',
++                ),
++                array(
++                    'key' => 'entity_url',
++                    'label' => 'Entity URL',
++                    'name' => 'entity_url',
++                    'type' => 'url',
++                ),
++                array(
++                    'key' => 'triggered',
++                    'label' => 'Triggered',
++                    'name' => 'triggered',
++                    'type' => 'true_false',
++                    'default_value' => 0,
++                ),
++                array(
++                    'key' => 'claimed',
++                    'label' => 'Claimed',
++                    'name' => 'claimed',
++                    'type' => 'true_false',
++                    'default_value' => 0,
++                ),
++                array(
++                    'key' => 'is_subscribed',
++                    'label' => 'Subscribe to Receive Weekly Email Report?',
++                    'name' => 'is_subscribed',
++                    'type' => 'true_false',
++                    'default_value' => 0,
++                ),
++            ),
++            'location' => array(
++                array(
++                    array(
++                        'param' => 'post_type',
++                        'operator' => '==',
++                        'value' => 'kg_entity',
++                    ),
++                ),
++            ),
++        ));
++    }
++}
++
++function wp_ajax_add_new_kg_entity_handler() {
++    if ( ! is_user_logged_in() ) {
++        wp_send_json_error( 
++            array( 
++                'msg'       => 'You must be logged in to add a new KG Entity.',
++                'status'    => 401
++            ) 
++        );
++    }
++
++    if ( ! empty( $_POST['kg_search_nonce'] ) ) {
++        $nonce = $_POST['kg_search_nonce'];
++    }
++
++    if( ! wp_verify_nonce( $nonce, 'kg-search-nonce' ) ) {
++        wp_send_json_error( 
++            array( 
++                'msg'       => 'bad nonce',
++                'status'    => 403
++            )
++        );
++    }
++
++    $is_entity_home = $_POST['is_entity_home'];
++    $title = $_POST['title'];
++    $kgmid = $_POST['kgmid'];
++    $type = $_POST['type'];
++    $confidence_score = $_POST['confidence_score'];
++    $description = $_POST['description'];
++    $detailed_description = $_POST['detailed_description'];
++    $detailed_description_url = $_POST['detailed_description_url'];
++    $entity_url = $_POST['entity_url'];
++    $img_url = $_POST['img_url'];
++    $tiggered = $_POST['triggered'];
++    $claimed = $_POST['claimed'];
++
++    $post_title = $title . ' - ' . $kgmid;
++
++    if ( $is_entity_home === 'true' || $is_entity_home === true ) {
++        $post_title = $post_title . ' - Entity Home';
++    }
++
++    $args = array(
++        'post_type'         => 'kg_entity',
++        'posts_per_page'    => -1,
++        'title'             => $post_title,
++        'author'            => get_current_user_id(),
++    );
++
++    $entities = new WP_Query( $args );
++
++    if ( $entities->have_posts() ) {
++        wp_send_json_error( 
++            array( 
++                'msg'       => 'This KG Entity already exists.',
++                'status'    => 400
++            )
++        );
++    }
++
++    remove_filter( 'acf/load_field', 'ycf_readonly_fields' );
++
++    $post_id = wp_insert_post(
++        array (
++            'post_type'      => 'kg_entity',
++            'post_title'     => $post_title,
++            'post_author'    => get_current_user_id(),
++            'post_content'   => '',
++            'post_status'    => 'publish',
++            'comment_status' => 'closed',   
++            'ping_status'    => 'closed',      
++        )
++    );
++
++    if ( ! empty( $is_entity_home ) ) {
++        update_field( 'is_entity_home', $is_entity_home === 'true'? true: false, $post_id );
++    }
++    if ( ! empty( $title ) ) {
++        update_field( 'title', $title, $post_id );
++    }
++    if ( ! empty( $kgmid ) ) {
++        update_field( 'kgmid', $kgmid, $post_id );
++    }
++    if ( ! empty( $type ) ) {
++        update_field( 'type', $type, $post_id );
++    }
++    if ( ! empty( $confidence_score ) ) {
++        update_field( 'confidence_score', $confidence_score, $post_id );
++    }
++    if ( ! empty( $description ) ) {
++        update_field( 'description', $description, $post_id );
++    }
++    if ( ! empty( $detailed_description ) ) {
++        update_field( 'detailed_description', $detailed_description, $post_id );
++    }
++    if ( ! empty( $detailed_description_url ) ) {
++        update_field( 'detailed_description_url', $detailed_description_url, $post_id );
++    }
++    if ( ! empty( $entity_url ) && $entity_url != '' ) {
++        update_field( 'entity_url', $entity_url, $post_id );
++    }
++    if ( ! empty( $img_url ) && $img_url != '' ) {
++        update_field( 'img_url', $img_url, $post_id );
++    }
++    if ( ! empty( $triggered ) ) {
++        update_field( 'triggered', $triggered === 'true'? true: false, $post_id );
++    }
++    if ( ! empty( $claimed ) ) {
++        update_field( 'claimed', $claimed === 'true'? true: false, $post_id );
++    }
++
++    $response = array(  
++        'msg'       => 'Successfully added new KG Entity.', 
++        'status'    => 200,
++        'in'        => array(
++            'is_entity_home'            => $is_entity_home,
++            'title'                     => $title,
++            'kgmid'                     => $kgmid,
++            'confidence_score'          => $confidence_score,
++            'description'               => $description,
++            'detailed_description'      => $detailed_description,
++            'detailed_description_url'  => $detailed_description_url,
++            'entity_url'                => $entity_url,
++            'img_url'                   => $img_url,
++            'triggered'                 => $triggered,
++            'claimed'                   => $claimed
++        ),
++        'out'       => array(
++            'is_entity_home'            => get_field( 'is_entity_home', $post_id ),
++            'title'                     => get_field( 'title', $post_id ),
++            'kgmid'                     => get_field( 'kgmid', $post_id ),
++            'confidence_score'          => get_field( 'confidence_score', $post_id ),
++            'description'               => get_field( 'description', $post_id ),
++            'detailed_description'      => get_field( 'detailed_description', $post_id ),
++            'detailed_description_url'  => get_field( 'detailed_description_url', $post_id ),
++            'entity_url'                => get_field( 'entity_url', $post_id ),
++            'img_url'                   => get_field( 'img_url', $post_id ),
++            'triggered'                 => get_field( 'triggered', $post_id ),
++            'claimed'                   => get_field( 'claimed', $post_id ),
++        )
++    );
++
++    add_filter( 'acf/load_field', 'ycf_readonly_fields' );
++
++    wp_send_json_success( $response );
++
++}
++
++function ycf_acf_save_kg_entity( $post_id ) {
++
++    if ( ! function_exists('get_field') ) {
++        return;
++    }
++
++    if ( get_post_type( $post_id ) !== 'kg_entity' ) {
++        return;
++    }
++
++    $is_subscribed = get_field( 'is_subscribed', $post_id );
++
++    if ( ! $is_subscribed ) {
++        return;
++    }
++
++    $user_id = get_the_author_meta( 'ID', $post_id );
++    $user_kg_report_entities = get_user_meta( $user_id, 'ycf_kg_report_entities' );
++    
++    if ( ! empty( $user_kg_report_entities ) ) {
++        if ( is_string( $user_kg_report_entities ) ) {
++            $user_kg_report_entities = explode( ',', $user_kg_report_entities );
++        }
++
++        if ( ! in_array( $post_id, $user_kg_report_entities ) ) {
++            return;
++        }
++
++        $user_kg_report_entities[] = $post_id;
++    } else {
++        $user_kg_report_entities = array( $post_id );
++    }
++
++    update_user_meta( $user_id, 'ycf_kg_report_entites', $user_kg_report_entities );
++
++    // if (! wp_next_scheduled ( 'my_hourly_event', $args )) {
++    // wp_schedule_event( time(), 'hourly', 'my_hourly_event', $args );
++    // }
++}
++
++function send_weekly_email_report( $user ) {
++    if ( is_string( $user ) || is_int( $user ) ) {
++        $user = get_user_by( 'id', $user );
++        if ( ! $user ) {
++            return;
++        }
++    }
++
++    $report_entities = get_user_meta('ycf_kg_report_entities', 'user_' . $user->ID);
++
++    if ( empty( $report_entities ) ) {
++        return;
++    }
++
++    if ( is_string( $report_entities ) ) {
++        $report_entities = explode(',', $report_entities);
++    }
++    
++    $email = $user->user_email;
++
++    $title = 'Weekly Knowledge Graph Report for ' . $user->display_name;
++    
++    $html  = `<div id="ycf-email-heading">
++                <h2>Weekly Knowledge Graph Report</h2>
++                <p>Here is your weekly report on the changes to your KG Entities.</p>
++              </div>
++              <div id="ycf-kg-entity-table-container">
++                <table id="kg-entity-table">
++                  <tr>
++                    <th>Title</th>
++                    <th>Confidence Score</th>
++                    <th>Confidence Score Delta</th>
++                    <th>Knowledge Panel Triggered?</th>
++                    <th>Knowledge Panel Claimed?</th>
++                  </tr>`;
++
++    $args = array(
++        'post_type'      => 'kg_entity',
++        'posts__in'      => $report_entities,
++    );
++
++    $entities = new WP_Query($args);
++
++    foreach ($entities->posts as $entity) {
++        $post_title = $entity->post_title;
++        $type = get_field('type', $entity->ID);
++        $confidence_score = get_field('confidence_score', $entity->ID);
++        $confidence_score_delta = get_field('confidence_score_delta', $entity->ID);
++        $triggered = get_field('triggered', $entity->ID);
++        $claimed = get_field('claimed', $entity->ID);
++
++        if ( $confidence_score_delta > 0 ) {
++            $color = 'green';
++        } else if ( $confidence_score_delta < 0 ) {
++            $color = 'red';
++        } else {
++            $color = 'black';
++        }
++
++        $html .= '<tr>';
++        $html .= '<td>' . esc_html($post_title) . '</td>';
++        $html .= '<td><span style="color: ' . $color . '">' . esc_html($confidence_score) . '</span></td>';
++        $html .= $confidence_score_delta != 0 ? '<td>' . esc_html($confidence_score_delta) . '</td>' : '';
++        $html .= '<td>' . esc_html($triggered) . '</td>';
++        $html .= '<td>' . esc_html($claimed) . '</td>';
++        $html .= '</tr>';
++    }
++
++    $html .= `</table>
++                </div>`;
++
++    $content_type = function() { return 'text/html'; };
++
++    add_filter( 'wp_mail_content_type', $content_type );
++
++    ob_start();
++    include './templates/template.php';
++    $content = ob_get_clean();
++
++    wp_mail( $email, $title, $content );
++
++    remove_filter( 'wp_mail_content_type', $content_type );
++}
++
++function ycf_weekly_kg_report() {
++    $users = get_users();
++
++    foreach ($users as $user) {
++        send_weekly_email_report( $user );
++    }
++}
++
++function ycf_weekly_kg_entity_update() {
++    $args = array(
++        'post_type'      => 'kg_entity',
++        'posts_per_page' => -1,
++    );
++
++    $entities = new WP_Query($args);
++
++    foreach ($entities->posts as $entity) {
++        try {
++
++            $response = wp_remote_get( $api_url, array(
++                'headers' => array(
++                    'Accept' => 'application/json',
++                )
++            ) );
++
++            if ( 
++                ! is_wp_error( $response ) 
++                && 200 === wp_remote_retrieve_response_code( $response ) 
++            ) {
++
++                $responseBody = json_decode( $response['body'] );
++
++                if( json_last_error() === JSON_ERROR_NONE ) {
++
++                    $confidence_score = get_field('confidence_score', $entity->ID);
++                    // $triggered = get_field('triggered', $entity->ID);
++                    // $claimed = get_field('claimed', $entity->ID);
++                    
++                    $new_confidence_score = $responseBody->confidence_score;
++                    // $new_triggered = $responseBody->triggered;
++                    // $new_claimed = $responseBody->claimed;
++
++                    if ( 
++                        ! empty( $new_confidence_score ) 
++                        && $new_confidence_score != $confidence_score
++                    ) {
++                        $confidence_score_delta = $new_confidence_score - $confidence_score;
++                        update_field('confidence_score_delta', $confidence_score_delta, $entity->ID);
++                        update_field('confidence_score', $new_confidence_score, $entity->ID);
++                    }
++            
++                    // if ( ! empty( $new_triggered ) && $new_triggered != get_field('triggered', $entity->ID) ) {
++                    //     update_field('triggered', $new_triggered, $entity->ID);
++                    // }
++                    
++                    // if ( ! empty( $new_claimed ) && $new_claimed != get_field('claimed', $entity->ID) ) {
++                    //     update_field('claimed', $new_claimed, $entity->ID);
++                    // }    
++                }
++            }
++        } catch( Exception $ex ) {
++            error_log( $ex->getMessage() );
++        }        
++    }
++}
++
++function kg_entity_singular_shortcode( $atts ) {
++    
++    if ( function_exists( 'get_field' ) ) {
++        $atts = shortcode_atts(array(
++            'id' => '',
++        ), $atts);
++
++        if (empty($atts['id'])) {
++            return 'No KG Entity ID provided.';
++        }
++    
++        $entity = get_post($atts['id']);
++    
++        if (!$entity || $entity->post_type !== 'kg_entity') {
++            return 'Invalid KG Entity ID.';
++        }
++
++        $owner_id = get_the_author_id();
++        $img_url = get_field('img_url', $entity->ID);
++        $title = $entity->post_title;
++        $kgmid = get_field('kgmid', $entity->ID);
++        $type = get_field('type', $entity->ID);
++        $description = get_field('description', $entity->ID);
++        $detailed_description = get_field('detailed_description', $entity->ID);
++        $detailed_description_url = get_field('detailed_description_url', $entity->ID);
++        $entity_url = get_field('entity_url', $entity->ID);
++
++    
++        $output  = '<div class="kg-result-card">';
++        $output .= isset($img_url) ? '<img class="kg-img" src="' . esc_html($img_url) . '" >' : '';
++        $output .= isset($title) ? '<h3 class="kg-heading entity-name">' . esc_html($title) . '</h3>' : '';
++        $output .= isset($owner_id) ? '<ul><li><strong>Owner ID:</strong> ' . esc_html($owner_id) . '</li>' : '';
++        $output .= isset($kgmid) ? '<li><strong>KGMID:</strong> ' . esc_html($kgmid) . '</li>' : '';
++        $output .= isset($type) ? '<li><strong>Type:</strong> ' . esc_html($type) . '</li>' : '';
++        $output .= isset($description) ? '<li><strong>Description:</strong> ' . esc_html($description) . '</li>' : '';
++        $output .= isset($detailed_description) ? '<li><strong>Detailed Description:</strong> ' . esc_html($detailed_description) . '</li>' : '';
++        $output .= isset($detailed_description_url) ? '<li><strong>Detailed Description URL:</strong> <a href="' . esc_url($detailed_description_url) . '" target="_blank">' . esc_html($detailed_description_url) . '</a></li>' : '';
++        $output .= isset($entity_url) ? '<li><strong>Entity URL:</strong> <a href="' . esc_url($entity_url) . '" target="_blank">' . esc_html($entity_url) . '</a></li><ul>' : '';
++        $output .= '</div>';
++    
++        wp_reset_postdata();
++        
++        return $output;
++    } else {
++        return;
++    }
++}   
++
++function kg_entity_grid_shortcode() {
++    if ( function_exists( 'get_field' ) ) {
++
++        if ( !is_user_logged_in() ) {
++            return 'Please log in to view your KG Entities.';
++        }
++
++        $current_user_id = get_current_user_id();
++    
++        $args = array(
++            'post_type'      => 'kg_entity',
++            'posts_per_page' => 10,
++            'author'    => $current_user_id,
++        );
++    
++        $entities = new WP_Query($args);
++    
++        if ( !$entities->have_posts() ) {
++            return 'No KG Entities found.';
++        }
++    
++        $output = '<div id="kg-entity-grid" class="kg-results-grid">';
++    
++        while ($entities->have_posts()) {
++            $entities->the_post();
++            $post_id = get_the_ID();
++
++            $owner_id = get_the_author_id();
++            $img_url = get_field('img_url', $post_id);
++            $title = get_the_title();
++            $kgmid = get_field('kgmid', $post_id);
++            $type = get_field('type', $post_id);
++            $description = get_field('description', $post_id);
++            $detailed_description = get_field('detailed_description', $post_id);
++            $detailed_description_url = get_field('detailed_description_url', $post_id);
++            $entity_url = get_field('entity_url', $post_id);
++        
++            $output .= '<div class="kg-result-card">';
++            $output .= !empty($img_url) ? '<img class="kg-img" src="' . esc_html($img_url) . '" >' : '';
++            $output .= !empty($title) ? '<h3 class="kg-heading entity-name">' . esc_html($title) . '</h3>' : '';
++            $output .= !empty($owner_id) ? '<ul><li><strong>Owner ID:</strong> ' . esc_html($owner_id) . '</li>' : '';
++            $output .= !empty($kgmid) ? '<li><strong>KGMID:</strong> ' . esc_html($kgmid) . '</li>' : '';
++            $output .= !empty($type) ? '<li><strong>Type:</strong> ' . esc_html($type) . '</li>' : '';
++            $output .= !empty($description) ? '<li><strong>Description:</strong> ' . esc_html($description) . '</li>' : '';
++            $output .= !empty($detailed_description) ? '<li><strong>Detailed Description:</strong> ' . esc_html($detailed_description) . '</li>' : '';
++            $output .= !empty($detailed_description_url) ? '<li><strong>Detailed Description URL:</strong> <a href="' . esc_url($detailed_description_url) . '" target="_blank">' . esc_html($detailed_description_url) . '</a></li>' : '';
++            $output .= !empty($entity_url) ? '<li><strong>Entity URL:</strong> <a href="' . esc_url($entity_url) . '" target="_blank">' . esc_html($entity_url) . '</a></li><ul>' : '';
++            $output .= '</div>';
++        }
++    
++        $output .= '</div>';
++        wp_reset_postdata();
++    
++        return $output;
++    } else {
++        return;
++    }
++}
++
++function ycf_readonly_fields( $field ) {
++
++    if ( 'is_entity_home' === $field['name'] ) {
++      $field['disabled'] = true;
++    } else if ( 'is_entity_home' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'kgmid' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'type' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'confidence_score' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'description' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'detailed_description' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'detailed_description_url' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'img_url' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'entity_url' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'triggered' === $field['name'] ) {
++        $field['disabled'] = true;
++    } else if ( 'claimed' === $field['name'] ) {
++        $field['disabled'] = true;
++    }
++  
++    return $field;
++} 
++
++function ycf_activation() {
++    // Schedule weekly event on plugin activation
++    if (! wp_next_scheduled ( 'ycf_weekly_kg_report' )) {
++        wp_schedule_event( strtotime("next Wednesday 3pm GMT"), 'weekly', 'ycf_weekly_kg_report' );
++    }
++
++    if (! wp_next_scheduled ( 'ycf_weekly_kg_entity_update' )) {
++        wp_schedule_event( strtotime("next Wednesday 2:30pm GMT"), 'weekly', 'ycf_weekly_kg_entity_update' );
++    }
++}
++
++function ycf_deactivation() {
++    // Remove scheduled task on plugin deactivation
++    wp_clear_scheduled_hook( 'ycf_weekly_kg_report' );
++    wp_clear_scheduled_hook( 'ycf_weekly_kg_entity_update' );
++}
